@@ -1,0 +1,16 @@
+# Globally set config options
+global:
+  timeout: 5000 # 5 seconds, how many milliseconds should we wait for the server to respond before we decide to give up
+  retries: 3 # How many times do we try again before giving up
+  retry_wait: 2 # How many milliseconds do we wait between retries
+entities:
+  - name: google
+    servers:
+      - 10.0.0.3
+      - 8.8.8.8
+  - name: potato
+    timeout: 3000 # We should be override global config here if we need to
+    servers:
+      - 216.58.209.174
+      - 216.58.210.163
+  
