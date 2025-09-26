@@ -3,13 +3,20 @@ global:
   timeout: 5000 # 5 seconds, how many milliseconds should we wait for the server to respond before we decide to give up
   retries: 3 # How many times do we try again before giving up
   retry_wait: 2 # How many milliseconds do we wait between retries
+  cloudflare:
+    cf_api_token: zreOBD56yKbiLMrX7f6jDUUKqTj7Af_4rHIQwQ2K # Cloudflare API token for DNS updates
+    cf_account_id: 65bb65b890a2bac44806963e60c661c3 # Cloudflare account ID
+    
+
 entities:
   - name: google
+    zone : 64ab0a3dd5417156a29fede88bf996cb
     servers:
       - 10.0.0.3
       - 8.8.8.8
   - name: potato
     timeout: 3000 # We should be override global config here if we need to
+    zone : 64ab0a3dd5417156a29fede88bf996cb
     servers:
       - 216.58.209.174
       - 216.58.210.163
