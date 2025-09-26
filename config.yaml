@@ -10,13 +10,15 @@ global:
 
 entities:
   - name: google
-    zone : 64ab0a3dd5417156a29fede88bf996cb
+    cloudflare:
+      cf_zone_id: 064ab0a3dd5417156a29fede88bf996cb # Cloudflare zone ID for DNS updates
     servers:
       - 10.0.0.3
       - 8.8.8.8
   - name: potato
     timeout: 3000 # We should be override global config here if we need to
-    zone : 64ab0a3dd5417156a29fede88bf996cb
+    cloudflare:
+      cf_zone_id: 64ab0a3dd5417156a29fede88bf996cb # Cloudflare zone ID for DNS updates
     servers:
       - 216.58.209.174
       - 216.58.210.163

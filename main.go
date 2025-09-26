@@ -8,21 +8,30 @@ import (
 	"os"
 	"time"
 
+	cloudflare "github.com/cloudflare/cloudflare-go"
 	"gopkg.in/yaml.v3"
 )
 
+type CloudflareConfig struct {
+	CFAPIToken  string `yaml:"cf_api_token"`
+	CFAccountID string `yaml:"cf_account_id"`
+	CFzoneID    string `yaml:"cf_zone_id"`
+}
+
 type GlobalConfig struct {
-	Timeout   int `yaml:"timeout"`
-	Retries   int `yaml:"retries"`
-	RetryWait int `yaml:"retry_wait"`
+	Timeout    int              `yaml:"timeout"`
+	Retries    int              `yaml:"retries"`
+	RetryWait  int              `yaml:"retry_wait"`
+	Cloudflare CloudflareConfig `yaml:"cloudflare"`
 }
 
 type EntityConfig struct {
-	Name      string   `yaml:"name"`
-	Servers   []string `yaml:"servers"`
-	Timeout   int      `yaml:"timeout,omitempty"`
-	Retries   int      `yaml:"retries,omitempty"`
-	RetryWait int      `yaml:"retry_wait,omitempty"`
+	Name             string           `yaml:"name"`
+	Servers          []string         `yaml:"servers"`
+	Timeout          int              `yaml:"timeout,omitempty"`
+	Retries          int              `yaml:"retries,omitempty"`
+	RetryWait        int              `yaml:"retry_wait,omitempty"`
+	CloudflareConfig CloudflareConfig `yaml:"cloudflare,omitempty"`
 }
 
 type Config struct {
@@ -42,6 +51,63 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// getConfigValue hakee arvon entityltä ensin, fallback globaalista
+func getConfigValue(cfg *Config, entityName string, key string) string {
+	var entity *EntityConfig
+	for _, e := range cfg.Entities {
+		if e.Name == entityName {
+			entity = &e
+			break
+		}
+	}
+
+	if entity != nil {
+		switch key {
+		case "timeout":
+			if entity.Timeout != 0 {
+				return fmt.Sprintf("%d", entity.Timeout)
+			}
+		case "retries":
+			if entity.Retries != 0 {
+				return fmt.Sprintf("%d", entity.Retries)
+			}
+		case "retry_wait":
+			if entity.RetryWait != 0 {
+				return fmt.Sprintf("%d", entity.RetryWait)
+			}
+		case "cf_zone_id":
+			if entity.CloudflareConfig.CFzoneID != "" {
+				return entity.CloudflareConfig.CFzoneID
+			}
+		case "cf_api_token":
+			if entity.CloudflareConfig.CFAPIToken != "" {
+				return entity.CloudflareConfig.CFAPIToken
+			}
+		case "cf_account_id":
+			if entity.CloudflareConfig.CFAccountID != "" {
+				return entity.CloudflareConfig.CFAccountID
+			}
+		}
+	}
+
+	switch key {
+	case "timeout":
+		return fmt.Sprintf("%d", cfg.Global.Timeout)
+	case "retries":
+		return fmt.Sprintf("%d", cfg.Global.Retries)
+	case "retry_wait":
+		return fmt.Sprintf("%d", cfg.Global.RetryWait)
+	case "cf_api_token":
+		return cfg.Global.Cloudflare.CFAPIToken
+	case "cf_account_id":
+		return cfg.Global.Cloudflare.CFAccountID
+	case "cf_zone_id":
+		return cfg.Global.Cloudflare.CFzoneID
+	}
+
+	return ""
+}
+
 func (cfg *Config) ApplyDefaults() {
 	for i, e := range cfg.Entities {
 		if e.Timeout == 0 {
@@ -56,7 +122,7 @@ func (cfg *Config) ApplyDefaults() {
 	}
 }
 
-// HTTP health check
+// Health check HTTP GET
 func healthCheck(url string, timeout, retries, retryWait int) bool {
 	client := &http.Client{
 		Timeout: time.Duration(timeout) * time.Millisecond,
@@ -88,18 +154,29 @@ func main() {
 	}
 	cfg.ApplyDefaults()
 
-	fmt.Println("Global config:")
-	fmt.Printf("Timeout=%d ms, Retries=%d, RetryWait=%d ms\n",
-		cfg.Global.Timeout, cfg.Global.Retries, cfg.Global.RetryWait)
+	fmt.Printf("Entities: %d\n", len(cfg.Entities))
 
-	// Loopataan jatkuvasti
+	// Cloudflare client käyttäen getConfigValue
+	globalToken := getConfigValue(cfg, "", "cf_api_token")
+	_, err = cloudflare.NewWithAPIToken(globalToken)
+	if err != nil {
+		log.Fatal("Cloudflare clientin luonti epäonnistui:", err)
+	}
+
 	for {
 		fmt.Println("\nUusi kierros:", time.Now().Format("15:04:05"))
 
 		for _, e := range cfg.Entities {
-			fmt.Printf("\nEntity: %s\n", e.Name)
+			zoneID := getConfigValue(cfg, e.Name, "cf_zone_id")
+			fmt.Printf("\nEntity: %s (zone: %s)\n", e.Name, zoneID)
+
 			for _, server := range e.Servers {
-				ok := healthCheck(server, e.Timeout, e.Retries, e.RetryWait)
+				url := server
+				if !(len(server) > 7 && (server[:7] == "http://" || server[:8] == "https://")) {
+					// oletetaan http, jos ei määritelty
+					url = "http://" + server
+				}
+				ok := healthCheck(url, e.Timeout, e.Retries, e.RetryWait)
 				if ok {
 					fmt.Printf("Server %s vastasi OK\n", server)
 				}
@@ -107,7 +184,6 @@ func main() {
 		}
 
 		fmt.Println("Odotetaan 5 sekuntia ennen seuraavaa kierrosta...")
-		time.Sleep(5 * time.Second) // <- vaihdettu 5 sekuntiin
+		time.Sleep(5 * time.Second)
 	}
-
 }
