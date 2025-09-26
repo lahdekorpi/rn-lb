@@ -31,3 +31,5 @@ go.work.sum
 # .idea/
 # .vscode/
 config.yaml
+.DS_Store
+# t --- IGNORE ---
