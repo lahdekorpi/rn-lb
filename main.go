@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	cloudflare "github.com/cloudflare/cloudflare-go"
@@ -16,24 +17,25 @@ import (
 type CloudflareConfig struct {
 	CFAPIToken  string `yaml:"cf_api_token"`
 	CFAccountID string `yaml:"cf_account_id"`
-	CFzoneID    string `yaml:"cf_zone_id"`
+	CFZoneID    string `yaml:"cf_zone_id"`
 }
 
 type GlobalConfig struct {
-	Timeout    int              `yaml:"timeout"`
-	Retries    int              `yaml:"retries"`
-	RetryWait  int              `yaml:"retry_wait"`
-	Cloudflare CloudflareConfig `yaml:"cloudflare"`
+	Timeout       int              `yaml:"timeout"`
+	Retries       int              `yaml:"retries"`
+	RetryWait     int              `yaml:"retry_wait"`
+	CheckInterval int              `yaml:"check_interval"`
+	Cloudflare    CloudflareConfig `yaml:"cloudflare"`
 }
 
 type EntityConfig struct {
-	Name             string           `yaml:"name"`
-	Hostname         string           `yaml:"hostname"`
-	Servers          []string         `yaml:"servers"`
-	Timeout          int              `yaml:"timeout,omitempty"`
-	Retries          int              `yaml:"retries,omitempty"`
-	RetryWait        int              `yaml:"retry_wait,omitempty"`
-	CloudflareConfig CloudflareConfig `yaml:"cloudflare,omitempty"`
+	Name       string           `yaml:"name"`
+	Hostname   string           `yaml:"hostname"`
+	Servers    []string         `yaml:"servers"`
+	Timeout    int              `yaml:"timeout,omitempty"`
+	Retries    int              `yaml:"retries,omitempty"`
+	RetryWait  int              `yaml:"retry_wait,omitempty"`
+	Cloudflare CloudflareConfig `yaml:"cloudflare,omitempty"`
 }
 
 type Config struct {
@@ -53,83 +55,32 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// getConfigValue hakee arvon entityltä ensin, fallback globaalista
-func getConfigValue(cfg *Config, entityName string, key string) string {
-	var entity *EntityConfig
-	for _, e := range cfg.Entities {
-		if e.Name == entityName {
-			entity = &e
-			break
-		}
-	}
-
-	if entity != nil {
-		switch key {
-		case "timeout":
-			if entity.Timeout != 0 {
-				return fmt.Sprintf("%d", entity.Timeout)
-			}
-		case "retries":
-			if entity.Retries != 0 {
-				return fmt.Sprintf("%d", entity.Retries)
-			}
-		case "retry_wait":
-			if entity.RetryWait != 0 {
-				return fmt.Sprintf("%d", entity.RetryWait)
-			}
-		case "cf_zone_id":
-			if entity.CloudflareConfig.CFzoneID != "" {
-				return entity.CloudflareConfig.CFzoneID
-			}
-		case "cf_api_token":
-			if entity.CloudflareConfig.CFAPIToken != "" {
-				return entity.CloudflareConfig.CFAPIToken
-			}
-		case "cf_account_id":
-			if entity.CloudflareConfig.CFAccountID != "" {
-				return entity.CloudflareConfig.CFAccountID
-			}
-		}
-	}
-
-	switch key {
-	case "timeout":
-		return fmt.Sprintf("%d", cfg.Global.Timeout)
-	case "retries":
-		return fmt.Sprintf("%d", cfg.Global.Retries)
-	case "retry_wait":
-		return fmt.Sprintf("%d", cfg.Global.RetryWait)
-	case "cf_api_token":
-		return cfg.Global.Cloudflare.CFAPIToken
-	case "cf_account_id":
-		return cfg.Global.Cloudflare.CFAccountID
-	case "cf_zone_id":
-		return cfg.Global.Cloudflare.CFzoneID
-	}
-
-	return ""
-}
-
 func (cfg *Config) ApplyDefaults() {
-	for i, e := range cfg.Entities {
+	for i := range cfg.Entities {
+		e := &cfg.Entities[i]
 		if e.Timeout == 0 {
-			cfg.Entities[i].Timeout = cfg.Global.Timeout
+			e.Timeout = cfg.Global.Timeout
 		}
 		if e.Retries == 0 {
-			cfg.Entities[i].Retries = cfg.Global.Retries
+			e.Retries = cfg.Global.Retries
 		}
 		if e.RetryWait == 0 {
-			cfg.Entities[i].RetryWait = cfg.Global.RetryWait
+			e.RetryWait = cfg.Global.RetryWait
+		}
+		// Täydennetään myös Cloudflare-arvot globaalista jos puuttuu
+		if e.Cloudflare.CFAPIToken == "" {
+			e.Cloudflare.CFAPIToken = cfg.Global.Cloudflare.CFAPIToken
+		}
+		if e.Cloudflare.CFAccountID == "" {
+			e.Cloudflare.CFAccountID = cfg.Global.Cloudflare.CFAccountID
 		}
 	}
 }
 
-// Health check HTTP GET
 func healthCheck(url string, timeout, retries, retryWait int) bool {
 	client := &http.Client{
 		Timeout: time.Duration(timeout) * time.Millisecond,
 	}
-
 	var lastErr error
 	for i := 0; i < retries; i++ {
 		resp, err := client.Get(url)
@@ -145,99 +96,135 @@ func healthCheck(url string, timeout, retries, retryWait int) bool {
 		}
 		time.Sleep(time.Duration(retryWait) * time.Millisecond)
 	}
-	log.Printf("Server %s ei vastannut: %v", url, lastErr)
+	log.Printf("  [healthcheck] %s FAIL: %v", url, lastErr)
 	return false
 }
 
-// Päivitä DNS Cloudflaren kautta terveillä IP:illä
-func updateDNSRecords(cfAPI *cloudflare.API, zoneID, hostname string, healthyIPs []string) error {
-	ctx := context.Background()
+func processEntity(ctx context.Context, cfAPI *cloudflare.API, e EntityConfig) {
+	log.Printf("[entity:%s] checking servers...", e.Name)
 
-	// ResourceContainer zone-ID:llä
-	rc := cloudflare.ZoneIdentifier(zoneID)
+	var wg sync.WaitGroup
+	results := make(chan string, len(e.Servers))
 
-	// hae nykyiset A-recordit
-	recs, _, err := cfAPI.ListDNSRecords(ctx, rc, cloudflare.ListDNSRecordsParams{
+	for _, server := range e.Servers {
+		wg.Add(1)
+		go func(srv string) {
+			defer wg.Done()
+			url := srv
+			if !(len(srv) > 7 && (srv[:7] == "http://" || srv[:8] == "https://")) {
+				url = "http://" + srv
+			}
+			if healthCheck(url, e.Timeout, e.Retries, e.RetryWait) {
+				results <- srv
+			}
+		}(server)
+	}
+
+	wg.Wait()
+	close(results)
+
+	var healthy []string
+	for ip := range results {
+		healthy = append(healthy, ip)
+	}
+
+	if len(healthy) == 0 {
+		log.Printf("[entity:%s] no healthy servers, skipping DNS update", e.Name)
+		return
+	}
+
+	zoneID := e.Cloudflare.CFZoneID
+	if zoneID == "" {
+		log.Printf("[entity:%s] missing Cloudflare zone ID", e.Name)
+		return
+	}
+
+	zone := cloudflare.ZoneIdentifier(zoneID)
+
+	// Hae olemassa olevat A-recordit
+	records, _, err := cfAPI.ListDNSRecords(ctx, zone, cloudflare.ListDNSRecordsParams{
 		Type: "A",
-		Name: hostname,
+		Name: e.Hostname,
 	})
 	if err != nil {
-		return fmt.Errorf("DNS recordien haku epäonnistui: %w", err)
+		log.Printf("[entity:%s] failed to list DNS records: %v", e.Name, err)
+		return
 	}
 
-	// poista vanhat
-	for _, r := range recs {
-		err := cfAPI.DeleteDNSRecord(ctx, rc, r.ID)
-		if err != nil {
-			return fmt.Errorf("recordin poisto epäonnistui (%s): %w", r.Name, err)
+	currentIPs := make(map[string]struct{})
+	for _, r := range records {
+		currentIPs[r.Content] = struct{}{}
+	}
+
+	// Tarkista onko muutos tarpeen
+	needUpdate := false
+	if len(currentIPs) != len(healthy) {
+		needUpdate = true
+	} else {
+		for _, ip := range healthy {
+			if _, ok := currentIPs[ip]; !ok {
+				needUpdate = true
+				break
+			}
 		}
 	}
 
-	// luo uudet
-	for _, ip := range healthyIPs {
-		newRec := cloudflare.CreateDNSRecordParams{
+	if !needUpdate {
+		log.Printf("[entity:%s] DNS already up-to-date", e.Name)
+		return
+	}
+
+	// Poista vanhat recordit
+	for _, r := range records {
+		err := cfAPI.DeleteDNSRecord(ctx, zone, r.ID)
+		if err != nil {
+			log.Printf("[entity:%s] failed to delete record %s: %v", e.Name, r.Content, err)
+		}
+	}
+
+	// Lisää uudet recordit
+	for _, ip := range healthy {
+		_, err := cfAPI.CreateDNSRecord(ctx, zone, cloudflare.CreateDNSRecordParams{
 			Type:    "A",
-			Name:    hostname,
+			Name:    e.Hostname,
 			Content: ip,
 			TTL:     60,
-		}
-		_, err := cfAPI.CreateDNSRecord(ctx, rc, newRec)
+		})
 		if err != nil {
-			return fmt.Errorf("recordin luonti epäonnistui (%s -> %s): %w", hostname, ip, err)
+			log.Printf("[entity:%s] failed to create record for %s: %v", e.Name, ip, err)
+		} else {
+			log.Printf("[entity:%s] added A-record %s -> %s", e.Name, e.Hostname, ip)
 		}
 	}
-
-	return nil
 }
 
 func main() {
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
-		log.Fatalf("Virhe configin latauksessa: %v", err)
+		log.Fatalf("failed to load config: %v", err)
 	}
 	cfg.ApplyDefaults()
 
-	fmt.Printf("Entities: %d\n", len(cfg.Entities))
+	ctx := context.Background()
 
-	// Cloudflare client globaalilla tokenilla
-	globalToken := getConfigValue(cfg, "", "cf_api_token")
-	cfAPI, err := cloudflare.NewWithAPIToken(globalToken)
+	cfAPI, err := cloudflare.NewWithAPIToken(cfg.Global.Cloudflare.CFAPIToken)
 	if err != nil {
-		log.Fatal("Cloudflare clientin luonti epäonnistui:", err)
+		log.Fatalf("failed to init Cloudflare API: %v", err)
+	}
+
+	interval := cfg.Global.CheckInterval
+	if interval == 0 {
+		interval = 5
 	}
 
 	for {
-		fmt.Println("\nUusi kierros:", time.Now().Format("15:04:05"))
+		log.Println("=== New health check round ===")
 
 		for _, e := range cfg.Entities {
-			zoneID := getConfigValue(cfg, e.Name, "cf_zone_id")
-			fmt.Printf("\nEntity: %s (zone: %s, hostname: %s)\n", e.Name, zoneID, e.Hostname)
-
-			var healthy []string
-			for _, server := range e.Servers {
-				url := server
-				if !(len(server) > 7 && (server[:7] == "http://" || server[:8] == "https://")) {
-					url = "http://" + server
-				}
-				if healthCheck(url, e.Timeout, e.Retries, e.RetryWait) {
-					fmt.Printf("Server %s vastasi OK\n", server)
-					healthy = append(healthy, server)
-				}
-			}
-
-			if len(healthy) > 0 {
-				err := updateDNSRecords(cfAPI, zoneID, e.Hostname, healthy)
-				if err != nil {
-					log.Printf("DNS päivitys epäonnistui entitylle %s: %v", e.Name, err)
-				} else {
-					fmt.Printf("DNS päivitetty: %s -> %v\n", e.Hostname, healthy)
-				}
-			} else {
-				log.Printf("Ei terveitä servereitä entitylle %s, DNS:ää ei päivitetä", e.Name)
-			}
+			processEntity(ctx, cfAPI, e)
 		}
 
-		fmt.Println("Odotetaan 5 sekuntia ennen seuraavaa kierrosta...")
-		time.Sleep(5 * time.Second)
+		log.Printf("Waiting %d seconds before next round...", interval)
+		time.Sleep(time.Duration(interval) * time.Second)
 	}
 }
