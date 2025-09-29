@@ -94,46 +94,52 @@ func healthCheck(url string, timeout, retries, retryWait int) bool {
 }
 
 // Synkkaa terveet IP:t Cloudflareen
-func syncDNSRecords(cfAPI *cloudflare.API, zoneID, hostname string, healthyIPs []string) error {
+func syncDNSRecords(cfAPI *cloudflare.API, zoneID, hostname, recordType string, values []string) error {
 	ctx := context.Background()
 
-	// Hae nykyiset DNS-recordit
-	records, _, err := cfAPI.ListDNSRecords(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{
+	// Haetaan olemassaolevat recordit
+	existing, _, err := cfAPI.ListDNSRecords(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{
+		Type: recordType,
 		Name: hostname,
-		Type: "A",
 	})
 	if err != nil {
-		return fmt.Errorf("DNS-recordien haku epäonnistui: %w", err)
+		return fmt.Errorf("DNS recordien haku epäonnistui: %w", err)
 	}
 
-	existingIPs := map[string]string{} // ip -> recordID
-	for _, r := range records {
-		existingIPs[r.Content] = r.ID
+	// Muodostetaan set olemassaolevista arvoista
+	existingSet := map[string]string{} // content -> recordID
+	for _, rec := range existing {
+		existingSet[rec.Content] = rec.ID
 	}
 
-	// Poista epäkelvot recordit
-	for ip, recID := range existingIPs {
-		if !contains(healthyIPs, ip) {
-			log.Printf("Poistetaan epäkelpo DNS A-record: %s -> %s", hostname, ip)
-			err := cfAPI.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), recID)
-			if err != nil {
-				log.Printf("Virhe poistaessa %s: %v", ip, err)
+	// Muodostetaan set halutuista arvoista
+	desiredSet := map[string]bool{}
+	for _, v := range values {
+		desiredSet[v] = true
+	}
+
+	// Poistetaan ylimääräiset
+	for content, id := range existingSet {
+		if !desiredSet[content] {
+			log.Printf("Poistetaan %s record: %s -> %s", recordType, hostname, content)
+			if err := cfAPI.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), id); err != nil {
+				return fmt.Errorf("poisto epäonnistui: %w", err)
 			}
 		}
 	}
 
-	// Lisää uudet puuttuvat recordit
-	for _, ip := range healthyIPs {
-		if _, exists := existingIPs[ip]; !exists {
-			log.Printf("Lisätään uusi DNS A-record: %s -> %s", hostname, ip)
+	// Luodaan puuttuvat
+	for content := range desiredSet {
+		if _, found := existingSet[content]; !found {
+			log.Printf("Lisätään %s record: %s -> %s", recordType, hostname, content)
 			_, err := cfAPI.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.CreateDNSRecordParams{
-				Type:    "A",
+				Type:    recordType,
 				Name:    hostname,
-				Content: ip,
-				TTL:     60, // lyhyt TTL
+				Content: content,
+				TTL:     60,
 			})
 			if err != nil {
-				log.Printf("Virhe lisättäessä %s: %v", ip, err)
+				return fmt.Errorf("luonti epäonnistui: %w", err)
 			}
 		}
 	}
@@ -180,7 +186,7 @@ func main() {
 
 			// Synkataan Cloudflareen
 			if len(healthy) > 0 {
-				err := syncDNSRecords(cfAPI, e.CloudflareConfig.CFzoneID, e.Hostname, healthy)
+				err := syncDNSRecords(cfAPI, e.CloudflareConfig.CFzoneID, e.Hostname, "A", healthy)
 				if err != nil {
 					log.Printf("Virhe synkatessa DNS-recordeja: %v", err)
 				}
