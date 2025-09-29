@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,7 @@ type GlobalConfig struct {
 
 type EntityConfig struct {
 	Name             string           `yaml:"name"`
+	Hostname         string           `yaml:"hostname"`
 	Servers          []string         `yaml:"servers"`
 	Timeout          int              `yaml:"timeout,omitempty"`
 	Retries          int              `yaml:"retries,omitempty"`
@@ -147,6 +149,47 @@ func healthCheck(url string, timeout, retries, retryWait int) bool {
 	return false
 }
 
+// Päivitä DNS Cloudflaren kautta terveillä IP:illä
+func updateDNSRecords(cfAPI *cloudflare.API, zoneID, hostname string, healthyIPs []string) error {
+	ctx := context.Background()
+
+	// ResourceContainer zone-ID:llä
+	rc := cloudflare.ZoneIdentifier(zoneID)
+
+	// hae nykyiset A-recordit
+	recs, _, err := cfAPI.ListDNSRecords(ctx, rc, cloudflare.ListDNSRecordsParams{
+		Type: "A",
+		Name: hostname,
+	})
+	if err != nil {
+		return fmt.Errorf("DNS recordien haku epäonnistui: %w", err)
+	}
+
+	// poista vanhat
+	for _, r := range recs {
+		err := cfAPI.DeleteDNSRecord(ctx, rc, r.ID)
+		if err != nil {
+			return fmt.Errorf("recordin poisto epäonnistui (%s): %w", r.Name, err)
+		}
+	}
+
+	// luo uudet
+	for _, ip := range healthyIPs {
+		newRec := cloudflare.CreateDNSRecordParams{
+			Type:    "A",
+			Name:    hostname,
+			Content: ip,
+			TTL:     60,
+		}
+		_, err := cfAPI.CreateDNSRecord(ctx, rc, newRec)
+		if err != nil {
+			return fmt.Errorf("recordin luonti epäonnistui (%s -> %s): %w", hostname, ip, err)
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
@@ -156,9 +199,9 @@ func main() {
 
 	fmt.Printf("Entities: %d\n", len(cfg.Entities))
 
-	// Cloudflare client käyttäen getConfigValue
+	// Cloudflare client globaalilla tokenilla
 	globalToken := getConfigValue(cfg, "", "cf_api_token")
-	_, err = cloudflare.NewWithAPIToken(globalToken)
+	cfAPI, err := cloudflare.NewWithAPIToken(globalToken)
 	if err != nil {
 		log.Fatal("Cloudflare clientin luonti epäonnistui:", err)
 	}
@@ -168,18 +211,29 @@ func main() {
 
 		for _, e := range cfg.Entities {
 			zoneID := getConfigValue(cfg, e.Name, "cf_zone_id")
-			fmt.Printf("\nEntity: %s (zone: %s)\n", e.Name, zoneID)
+			fmt.Printf("\nEntity: %s (zone: %s, hostname: %s)\n", e.Name, zoneID, e.Hostname)
 
+			var healthy []string
 			for _, server := range e.Servers {
 				url := server
 				if !(len(server) > 7 && (server[:7] == "http://" || server[:8] == "https://")) {
-					// oletetaan http, jos ei määritelty
 					url = "http://" + server
 				}
-				ok := healthCheck(url, e.Timeout, e.Retries, e.RetryWait)
-				if ok {
+				if healthCheck(url, e.Timeout, e.Retries, e.RetryWait) {
 					fmt.Printf("Server %s vastasi OK\n", server)
+					healthy = append(healthy, server)
 				}
+			}
+
+			if len(healthy) > 0 {
+				err := updateDNSRecords(cfAPI, zoneID, e.Hostname, healthy)
+				if err != nil {
+					log.Printf("DNS päivitys epäonnistui entitylle %s: %v", e.Name, err)
+				} else {
+					fmt.Printf("DNS päivitetty: %s -> %v\n", e.Hostname, healthy)
+				}
+			} else {
+				log.Printf("Ei terveitä servereitä entitylle %s, DNS:ää ei päivitetä", e.Name)
 			}
 		}
 
