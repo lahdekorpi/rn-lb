@@ -2050,7 +2050,7 @@ Usage:
 ```ini
 [Unit]
 Description=RN-LB Distributed Load Balancer (Monolithic)
-Documentation=https://github.com/user/rn-lb
+Documentation=https://github.com/lahdekorpi/rn-lb
 After=network-online.target
 Wants=network-online.target
 
@@ -2087,7 +2087,7 @@ WantedBy=multi-user.target
 ```ini
 [Unit]
 Description=RN-LB Distributed Load Balancer (Main Daemon)
-Documentation=https://github.com/user/rn-lb
+Documentation=https://github.com/lahdekorpi/rn-lb
 After=network-online.target rn-lb-proxy.service
 Wants=network-online.target
 Requires=rn-lb-proxy.service
@@ -2125,7 +2125,7 @@ WantedBy=multi-user.target
 ```ini
 [Unit]
 Description=RN-LB API Proxy
-Documentation=https://github.com/user/rn-lb
+Documentation=https://github.com/lahdekorpi/rn-lb
 After=network-online.target
 Wants=network-online.target
 
@@ -2290,8 +2290,6 @@ sudo journalctl -u rn-lb-proxy -f
 - Unit tests for health checks
 - Integration test with Cloudflare API (using test zone)
 
-**Duration:** 2-3 weeks
-
 ### Phase 2: Coordination and Election
 
 **Goals:** Multi-daemon coordination, primary election, TXT record schema
@@ -2330,8 +2328,6 @@ sudo journalctl -u rn-lb-proxy -f
 - Failover tests (kill primary, verify secondary takeover)
 - Split-brain scenario tests
 
-**Duration:** 3-4 weeks
-
 ### Phase 3: Consensus and Health Logic
 
 **Goals:** Multi-daemon health consensus, isolation detection, edge cases
@@ -2366,8 +2362,6 @@ sudo journalctl -u rn-lb-proxy -f
 - Isolation detection tests (network partition simulation)
 - All-down protection tests
 - Witness record tests
-
-**Duration:** 2-3 weeks
 
 ### Phase 4: Isolation Layer
 
@@ -2415,8 +2409,6 @@ sudo journalctl -u rn-lb-proxy -f
 - ACL enforcement tests
 - JWT validation tests
 - Proxy failover tests
-
-**Duration:** 2-3 weeks
 
 ### Phase 5: Production Readiness
 
@@ -2466,8 +2458,6 @@ sudo journalctl -u rn-lb-proxy -f
 - End-to-end production simulation tests
 - Chaos testing (random daemon crashes, network issues)
 - Performance tests (many hostnames, many daemons)
-
-**Duration:** 2-3 weeks
 
 ### Phase 6: Additional Features (Future)
 
