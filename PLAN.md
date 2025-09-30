@@ -187,12 +187,12 @@ The main monitoring daemon that runs on each node. Responsible for:
 - Handling graceful shutdown and config reload (SIGHUP)
 
 **Key Modules:**
-- `config`: Configuration loading and validation
+- `config`: Configuration loading, validation, and provider override merging
 - `daemon`: Daemon lifecycle and ID management
 - `health`: Health check execution and result tracking
 - `consensus`: Health consensus algorithm
 - `election`: Primary election logic
-- `coordinator`: Main coordination loop
+- `coordinator`: Main coordination loop per entity (uses per-entity provider)
 - `provider`: DNS provider abstraction interface
 - `client`: HTTP client for isolation layer (if enabled)
 
@@ -1208,6 +1208,13 @@ func NewProvider(config ProviderConfig) (Provider, error) {
 
 ### Provider Selection in Configuration
 
+Global provider configuration serves as the default for all entities. Each entity can override any or all provider settings, enabling multi-domain and multi-account setups.
+
+**Use Cases:**
+- Multiple domains using different Cloudflare zones
+- Different domains with separate Cloudflare accounts
+- Mixed provider environments (some entities on Cloudflare, others on Route53)
+
 ```yaml
 global:
   provider:
@@ -1218,13 +1225,39 @@ global:
       zone_id: ${CF_ZONE_ID}
 
 entities:
+  # Entity using global provider settings
   - name: app1
     hostname: app.example.com
-    # Can override provider per entity if needed
+    # No provider override - uses global settings
+  
+  # Entity overriding only zone_id (same account/token)
+  - name: app2
+    hostname: app2.example.com
     provider:
       type: cloudflare
       cloudflare:
         zone_id: different-zone-id
+  
+  # Entity with completely different Cloudflare account
+  - name: client1
+    hostname: app.client1.com
+    provider:
+      type: cloudflare
+      cloudflare:
+        api_token: ${CLIENT1_CF_API_TOKEN}
+        account_id: ${CLIENT1_CF_ACCOUNT_ID}
+        zone_id: ${CLIENT1_CF_ZONE_ID}
+  
+  # Entity using different provider entirely
+  - name: app3
+    hostname: app3.example.org
+    provider:
+      type: route53
+      route53:
+        access_key_id: ${AWS_ACCESS_KEY_ID}
+        secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+        region: us-east-1
+        hosted_zone_id: Z1234567890ABC
 ```
 
 ---
@@ -1577,6 +1610,14 @@ client := &http.Client{
 
 ## Configuration Schema
 
+The configuration system uses a hierarchical approach where global settings provide defaults that can be selectively overridden per entity. This includes provider credentials, allowing multi-domain and multi-account deployments.
+
+**Provider Override Behavior:**
+- Global provider configuration is the default for all entities
+- Each entity can override none, some, or all provider settings
+- Useful for managing multiple Cloudflare accounts, different zones, or mixed providers
+- Only specified fields are overridden; unspecified fields inherit from global
+
 ### Complete Configuration Example
 
 ```yaml
@@ -1701,11 +1742,29 @@ entities:
           type: http
           path: /ping
     
-    # Use different provider for this entity
+    # Override only zone_id (same Cloudflare account as global)
     provider:
       type: cloudflare
       cloudflare:
         zone_id: different-zone-id
+  
+  - name: client-domain
+    hostname: app.clientdomain.com
+    
+    servers:
+      - id: client-srv1
+        address: 203.0.113.10
+        check:
+          type: http
+          path: /health
+    
+    # Completely different Cloudflare account for client domain
+    provider:
+      type: cloudflare
+      cloudflare:
+        api_token: ${CLIENT_CF_API_TOKEN}
+        account_id: ${CLIENT_CF_ACCOUNT_ID}
+        zone_id: ${CLIENT_CF_ZONE_ID}
 ```
 
 ### Proxy Configuration Example
@@ -1783,9 +1842,31 @@ Validate configuration on startup:
 1. Required fields present
 2. Numeric values in valid ranges
 3. Server IDs unique within entity
-4. Provider credentials present
-5. Isolation proxy URLs reachable (if enabled)
-6. JWT secret file readable (if isolation enabled)
+4. Provider credentials present (check both global and per-entity overrides)
+5. Each entity has valid provider configuration after applying overrides
+6. Isolation proxy URLs reachable (if enabled)
+7. JWT secret file readable (if isolation enabled)
+
+**Provider Validation Logic:**
+```go
+func validateEntityProvider(global ProviderConfig, entity EntityConfig) error {
+    // Merge entity provider config over global config
+    merged := mergeProviderConfig(global, entity.Provider)
+    
+    // Validate merged config has all required fields
+    switch merged.Type {
+    case "cloudflare":
+        if merged.APIToken == "" {
+            return fmt.Errorf("entity %s: cloudflare api_token not set (check global and entity config)", entity.Name)
+        }
+        if merged.ZoneID == "" {
+            return fmt.Errorf("entity %s: cloudflare zone_id not set", entity.Name)
+        }
+    // ... other providers
+    }
+    return nil
+}
+```
 
 ### Configuration Reload (SIGHUP)
 
@@ -2253,10 +2334,11 @@ sudo journalctl -u rn-lb-proxy -f
    - Setup Makefile
 
 2. Configuration system
-   - Define configuration structs
+   - Define configuration structs (support provider overrides per entity)
    - YAML parsing
    - Environment variable expansion
-   - Validation
+   - Provider config merging (entity overrides over global)
+   - Validation (including merged provider configs)
 
 3. Daemon lifecycle
    - Daemon ID generation and persistence
@@ -2501,7 +2583,8 @@ sudo journalctl -u rn-lb-proxy -f
 - [ ] Create Makefile with build targets
 - [ ] Implement configuration structs and YAML parsing
 - [ ] Add environment variable expansion support
-- [ ] Implement configuration validation
+- [ ] Implement provider config merging (entity overrides over global)
+- [ ] Implement configuration validation (including merged provider configs)
 - [ ] Create daemon lifecycle management (start, stop, reload)
 - [ ] Implement daemon ID generation and persistence
 - [ ] Add signal handling (SIGTERM, SIGINT, SIGHUP)
