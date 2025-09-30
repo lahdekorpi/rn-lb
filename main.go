@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	cloudflare "github.com/cloudflare/cloudflare-go"
 	"gopkg.in/yaml.v3"
 )
+
+// ---------- CONFIG STRUCTS ----------
 
 type CloudflareConfig struct {
 	CFAPIToken  string `yaml:"cf_api_token"`
@@ -20,11 +24,10 @@ type CloudflareConfig struct {
 }
 
 type GlobalConfig struct {
-	Timeout       int              `yaml:"timeout"`
-	Retries       int              `yaml:"retries"`
-	RetryWait     int              `yaml:"retry_wait"`
-	CheckInterval int              `yaml:"check_interval"`
-	Cloudflare    CloudflareConfig `yaml:"cloudflare"`
+	Timeout    int              `yaml:"timeout"`
+	Retries    int              `yaml:"retries"`
+	RetryWait  int              `yaml:"retry_wait"`
+	Cloudflare CloudflareConfig `yaml:"cloudflare"`
 }
 
 type EntityConfig struct {
@@ -41,6 +44,8 @@ type Config struct {
 	Global   GlobalConfig   `yaml:"global"`
 	Entities []EntityConfig `yaml:"entities"`
 }
+
+// ---------- CONFIG LOADING ----------
 
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -68,7 +73,66 @@ func (cfg *Config) ApplyDefaults() {
 	}
 }
 
-// Health check HTTP GET
+// ---------- CONFIG HELPER ----------
+
+func getConfigValue(cfg *Config, entityName string, key string) string {
+	var entity *EntityConfig
+	for _, e := range cfg.Entities {
+		if e.Name == entityName {
+			entity = &e
+			break
+		}
+	}
+
+	if entity != nil {
+		switch key {
+		case "timeout":
+			if entity.Timeout != 0 {
+				return fmt.Sprintf("%d", entity.Timeout)
+			}
+		case "retries":
+			if entity.Retries != 0 {
+				return fmt.Sprintf("%d", entity.Retries)
+			}
+		case "retry_wait":
+			if entity.RetryWait != 0 {
+				return fmt.Sprintf("%d", entity.RetryWait)
+			}
+		case "cf_zone_id":
+			if entity.CloudflareConfig.CFzoneID != "" {
+				return entity.CloudflareConfig.CFzoneID
+			}
+		case "cf_api_token":
+			if entity.CloudflareConfig.CFAPIToken != "" {
+				return entity.CloudflareConfig.CFAPIToken
+			}
+		case "cf_account_id":
+			if entity.CloudflareConfig.CFAccountID != "" {
+				return entity.CloudflareConfig.CFAccountID
+			}
+		}
+	}
+
+	switch key {
+	case "timeout":
+		return fmt.Sprintf("%d", cfg.Global.Timeout)
+	case "retries":
+		return fmt.Sprintf("%d", cfg.Global.Retries)
+	case "retry_wait":
+		return fmt.Sprintf("%d", cfg.Global.RetryWait)
+	case "cf_api_token":
+		return cfg.Global.Cloudflare.CFAPIToken
+	case "cf_account_id":
+		return cfg.Global.Cloudflare.CFAccountID
+	case "cf_zone_id":
+		return cfg.Global.Cloudflare.CFzoneID
+	}
+
+	return ""
+}
+
+// ---------- HEALTH CHECK ----------
+
 func healthCheck(url string, timeout, retries, retryWait int) bool {
 	client := &http.Client{
 		Timeout: time.Duration(timeout) * time.Millisecond,
@@ -76,7 +140,7 @@ func healthCheck(url string, timeout, retries, retryWait int) bool {
 
 	var lastErr error
 	for i := 0; i < retries; i++ {
-		resp, err := client.Get("http://" + url) // oletetaan että server on IP/hostname ilman schemeä
+		resp, err := client.Get(url)
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -89,113 +153,180 @@ func healthCheck(url string, timeout, retries, retryWait int) bool {
 		}
 		time.Sleep(time.Duration(retryWait) * time.Millisecond)
 	}
-	log.Printf("Server %s ei vastannut: %v", url, lastErr)
+	log.Printf("Server %s did not respond: %v", url, lastErr)
 	return false
 }
 
-// Synkkaa terveet IP:t Cloudflareen
-func syncDNSRecords(cfAPI *cloudflare.API, zoneID, hostname, recordType string, values []string) error {
-	ctx := context.Background()
+// ---------- DNS HELPERS ----------
 
-	// Haetaan olemassaolevat recordit
-	existing, _, err := cfAPI.ListDNSRecords(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{
-		Type: recordType,
+func getTXTRecord(hostname string) ([]string, error) {
+	records, err := net.LookupTXT(hostname)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) > 0 {
+		return strings.Split(records[0], ","), nil
+	}
+	return []string{}, nil
+}
+
+func syncDNSRecords(ctx context.Context, api *cloudflare.API, zoneID, hostname string, healthyServers []string, rateLimiter <-chan time.Time) error {
+	rc := cloudflare.ZoneIdentifier(zoneID)
+
+	existing, _, err := api.ListDNSRecords(ctx, rc, cloudflare.ListDNSRecordsParams{
+		Type: "A",
 		Name: hostname,
 	})
 	if err != nil {
-		return fmt.Errorf("DNS recordien haku epäonnistui: %w", err)
+		return fmt.Errorf("failed to list DNS records: %w", err)
 	}
 
-	// Muodostetaan set olemassaolevista arvoista
-	existingSet := map[string]string{} // content -> recordID
+	desired := make(map[string]bool)
+	for _, ip := range healthyServers {
+		desired[ip] = true
+	}
+
 	for _, rec := range existing {
-		existingSet[rec.Content] = rec.ID
-	}
-
-	// Muodostetaan set halutuista arvoista
-	desiredSet := map[string]bool{}
-	for _, v := range values {
-		desiredSet[v] = true
-	}
-
-	// Poistetaan ylimääräiset
-	for content, id := range existingSet {
-		if !desiredSet[content] {
-			log.Printf("Poistetaan %s record: %s -> %s", recordType, hostname, content)
-			if err := cfAPI.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), id); err != nil {
-				return fmt.Errorf("poisto epäonnistui: %w", err)
+		if !desired[rec.Content] {
+			<-rateLimiter
+			log.Printf("Deleting old A record %s -> %s", rec.Name, rec.Content)
+			if err := api.DeleteDNSRecord(ctx, rc, rec.ID); err != nil {
+				return fmt.Errorf("failed to delete DNS record: %w", err)
 			}
+		} else {
+			delete(desired, rec.Content)
 		}
 	}
 
-	// Luodaan puuttuvat
-	for content := range desiredSet {
-		if _, found := existingSet[content]; !found {
-			log.Printf("Lisätään %s record: %s -> %s", recordType, hostname, content)
-			_, err := cfAPI.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.CreateDNSRecordParams{
-				Type:    recordType,
-				Name:    hostname,
-				Content: content,
-				TTL:     60,
-			})
-			if err != nil {
-				return fmt.Errorf("luonti epäonnistui: %w", err)
-			}
+	for ip := range desired {
+		<-rateLimiter
+		params := cloudflare.CreateDNSRecordParams{
+			Type:    "A",
+			Name:    hostname,
+			Content: ip,
+			TTL:     60,
+		}
+		log.Printf("Creating A record %s -> %s", hostname, ip)
+		if _, err := api.CreateDNSRecord(ctx, rc, params); err != nil {
+			return fmt.Errorf("failed to create DNS record: %w", err)
 		}
 	}
 
 	return nil
 }
 
-func contains(list []string, val string) bool {
-	for _, v := range list {
-		if v == val {
-			return true
+func syncTXTRecord(ctx context.Context, api *cloudflare.API, zoneID, hostname, content string, rateLimiter <-chan time.Time) error {
+	rc := cloudflare.ZoneIdentifier(zoneID)
+
+	existing, _, err := api.ListDNSRecords(ctx, rc, cloudflare.ListDNSRecordsParams{
+		Type: "TXT",
+		Name: hostname,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list TXT records: %w", err)
+	}
+
+	for _, rec := range existing {
+		if rec.Content != content {
+			<-rateLimiter
+			log.Printf("Deleting old TXT record %s -> %s", rec.Name, rec.Content)
+			if err := api.DeleteDNSRecord(ctx, rc, rec.ID); err != nil {
+				return fmt.Errorf("failed to delete TXT record: %w", err)
+			}
+		} else {
+			return nil
 		}
 	}
-	return false
+
+	<-rateLimiter
+	params := cloudflare.CreateDNSRecordParams{
+		Type:    "TXT",
+		Name:    hostname,
+		Content: content,
+		TTL:     60,
+	}
+	log.Printf("Creating TXT record %s -> %s", hostname, content)
+	if _, err := api.CreateDNSRecord(ctx, rc, params); err != nil {
+		return fmt.Errorf("failed to create TXT record: %w", err)
+	}
+
+	return nil
 }
+
+// ---------- HELPER ----------
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------- MAIN ----------
 
 func main() {
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
-		log.Fatalf("Virhe configin latauksessa: %v", err)
+		log.Fatalf("Error loading config: %v", err)
 	}
 	cfg.ApplyDefaults()
 
-	// Luo Cloudflare client
-	cfAPI, err := cloudflare.NewWithAPIToken(cfg.Global.Cloudflare.CFAPIToken)
+	fmt.Printf("Entities: %d\n", len(cfg.Entities))
+
+	globalToken := getConfigValue(cfg, "", "cf_api_token")
+	cfAPI, err := cloudflare.NewWithAPIToken(globalToken)
 	if err != nil {
-		log.Fatal("Cloudflare clientin luonti epäonnistui:", err)
+		log.Fatal("Failed to create Cloudflare client:", err)
 	}
 
+	rateLimiter := time.Tick(500 * time.Millisecond)
+
 	for {
-		fmt.Println("\nUusi kierros:", time.Now().Format("15:04:05"))
+		ctx := context.Background()
+		fmt.Println("\nNew cycle:", time.Now().Format("15:04:05"))
 
 		for _, e := range cfg.Entities {
-			var healthy []string
-			fmt.Printf("\nEntity: %s (hostname: %s)\n", e.Name, e.Hostname)
+			zoneID := getConfigValue(cfg, e.Name, "cf_zone_id")
+			fmt.Printf("\nEntity: %s (zone: %s)\n", e.Name, zoneID)
 
-			// Health check kaikille servereille
+			healthyServers := []string{}
 			for _, server := range e.Servers {
-				if healthCheck(server, e.Timeout, e.Retries, e.RetryWait) {
-					fmt.Printf("Server %s vastasi OK\n", server)
-					healthy = append(healthy, server)
+				url := server
+				if !(strings.HasPrefix(server, "http://") || strings.HasPrefix(server, "https://")) {
+					url = "http://" + server
+				}
+				if healthCheck(url, e.Timeout, e.Retries, e.RetryWait) {
+					fmt.Printf("Server %s responded OK\n", server)
+					healthyServers = append(healthyServers, server)
 				}
 			}
 
-			// Synkataan Cloudflareen
-			if len(healthy) > 0 {
-				err := syncDNSRecords(cfAPI, e.CloudflareConfig.CFzoneID, e.Hostname, "A", healthy)
-				if err != nil {
-					log.Printf("Virhe synkatessa DNS-recordeja: %v", err)
+			if len(healthyServers) == 0 {
+				fmt.Println("No healthy servers -> clearing A records and marking TXT as DOWN")
+				if err := syncDNSRecords(ctx, cfAPI, zoneID, e.Hostname, []string{}, rateLimiter); err != nil {
+					log.Printf("Failed to clear A records: %v", err)
+				}
+				if err := syncTXTRecord(ctx, cfAPI, zoneID, "health."+e.Hostname, "DOWN", rateLimiter); err != nil {
+					log.Printf("Failed to update TXT record: %v", err)
 				}
 			} else {
-				log.Printf("Ei yhtään tervettä serveriä entitylle %s", e.Name)
+				if err := syncDNSRecords(ctx, cfAPI, zoneID, e.Hostname, healthyServers, rateLimiter); err != nil {
+					log.Printf("Failed to sync A records: %v", err)
+				}
+				txtHost := "health." + e.Hostname
+				txtContent := strings.Join(healthyServers, ",")
+				if err := syncTXTRecord(ctx, cfAPI, zoneID, txtHost, txtContent, rateLimiter); err != nil {
+					log.Printf("Failed to sync TXT record: %v", err)
+				}
 			}
 		}
 
-		fmt.Printf("Odotetaan %d sekuntia ennen seuraavaa kierrosta...\n", cfg.Global.CheckInterval)
-		time.Sleep(time.Duration(cfg.Global.CheckInterval) * time.Second)
+		fmt.Println("Waiting 60 seconds before next cycle...")
+		time.Sleep(60 * time.Second)
 	}
 }
