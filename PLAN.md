@@ -1,3 +1,5 @@
+![RN-LB Logo](./.github/assets/rn-lb.svg)
+
 # RN-LB: Distributed Load Balancer System - Comprehensive Implementation Plan
 
 ## Table of Contents
