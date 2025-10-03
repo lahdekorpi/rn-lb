@@ -3,6 +3,7 @@ package health
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -10,88 +11,99 @@ import (
 	"rn-lb/internal/config"
 )
 
-type Result struct {
-	ServerID string
-	Healthy  bool
-	Error    error
-}
-
-func CheckServer(server config.ServerEntry) Result {
-	c := server.Check
-
-	timeout := c.Timeout
-	if timeout == 0 {
-		timeout = 3 * time.Second
+// Check suorittaa health checkin serverille configin perusteella.
+// Palauttaa true jos serveri vastaa terveenä.
+func Check(url string, hc config.HealthCheck, he config.HealthSettings) bool {
+	timeout := he.Timeout
+	if hc.Timeout > 0 {
+		timeout = hc.Timeout
 	}
 
-	switch c.Type {
-	case "http":
-		return checkHTTP(server, timeout)
-	case "tcp":
-		return checkTCP(server, timeout)
-	default:
-		return Result{ServerID: server.ID, Healthy: false, Error: fmt.Errorf("unsupported check type: %s", c.Type)}
+	retries := he.Retries
+	if hc.Retries > 0 {
+		retries = hc.Retries
 	}
+
+	retryWait := he.RetryWait
+	if hc.RetryWait > 0 {
+		retryWait = hc.RetryWait
+	}
+
+	for i := 0; i < retries; i++ {
+		ok := false
+		var err error
+
+		switch hc.Type {
+		case "http":
+			ok, err = httpCheck(hc, timeout)
+		case "tcp":
+			ok, err = tcpCheck(hc, timeout)
+		default:
+			log.Printf("Unknown health check type: %s", hc.Type)
+			return false
+		}
+
+		if ok {
+			return true
+		}
+
+		log.Printf("Health check failed (%s) attempt %d/%d: %v",
+			hc.Type, i+1, retries, err)
+		time.Sleep(retryWait)
+	}
+	return false
 }
 
-func checkHTTP(server config.ServerEntry, timeout time.Duration) Result {
-	c := server.Check
+func httpCheck(hc config.HealthCheck, timeout time.Duration) (bool, error) {
+	client := &http.Client{
+		Timeout: timeout,
+	}
 
-	url := fmt.Sprintf("%s://%s:%d%s",
-		firstNonEmpty(c.Protocol, "http"),
-		server.Address,
-		c.Port,
-		c.Path)
+	// Build full URL
+	protocol := hc.Protocol
+	if protocol == "" {
+		protocol = "http"
+	}
+	url := fmt.Sprintf("%s://%s:%d%s", protocol, hc.Host, hc.Port, hc.Path)
+	if hc.Method == "" {
+		hc.Method = "GET"
+	}
 
-	client := &http.Client{Timeout: timeout}
-
-	req, err := http.NewRequest(firstNonEmpty(c.Method, "GET"), url, nil)
+	req, err := http.NewRequest(hc.Method, url, nil)
 	if err != nil {
-		return Result{ServerID: server.ID, Healthy: false, Error: err}
+		return false, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return Result{ServerID: server.ID, Healthy: false, Error: err}
+		return false, err
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 
-	// if valid_status is empty, accept 200..399
-	if len(c.ValidStatus) == 0 {
-		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			return Result{ServerID: server.ID, Healthy: true}
+	// Jos valid_status lista määritelty, käytetään sitä
+	if len(hc.ValidStatus) > 0 {
+		for _, code := range hc.ValidStatus {
+			if resp.StatusCode == code {
+				return true, nil
+			}
 		}
-		return Result{ServerID: server.ID, Healthy: false, Error: fmt.Errorf("status %d", resp.StatusCode)}
+		return false, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	for _, code := range c.ValidStatus {
-		if resp.StatusCode == code {
-			return Result{ServerID: server.ID, Healthy: true}
-		}
+	// muuten hyväksytään 200–399
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return true, nil
 	}
-
-	return Result{ServerID: server.ID, Healthy: false, Error: fmt.Errorf("invalid status %d", resp.StatusCode)}
+	return false, fmt.Errorf("bad status %d", resp.StatusCode)
 }
 
-func checkTCP(server config.ServerEntry, timeout time.Duration) Result {
-	c := server.Check
-
-	addr := fmt.Sprintf("%s:%d", server.Address, c.Port)
-
+func tcpCheck(hc config.HealthCheck, timeout time.Duration) (bool, error) {
+	addr := fmt.Sprintf("%s:%d", hc.Host, hc.Port)
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		return Result{ServerID: server.ID, Healthy: false, Error: err}
+		return false, err
 	}
 	conn.Close()
-	return Result{ServerID: server.ID, Healthy: true}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
+	return true, nil
 }

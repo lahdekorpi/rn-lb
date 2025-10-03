@@ -2,16 +2,20 @@ package main
 
 import (
 	"log"
+
 	"rn-lb/internal/config"
 	"rn-lb/internal/coordinator"
+	//	"rn-lb/internal/provider/cloudflare"
 )
 
 func main() {
-	cfg, err := config.Load("config.yaml")
+	// Ladataan config.yaml
+	cfg, err := config.LoadConfig("config.yaml")
 	if err != nil {
-		log.Fatalf("Error loading config: %v", err)
+		log.Fatalf("Failed to load config: %v", err)
 	}
-	cfg.ApplyDefaults()
 
-	coordinator.Run(cfg)
+	// Käynnistetään koordinointi
+	var secondArg /* TODO: replace with the correct type and value */
+	coordinator.Run(cfg, secondArg)
 }
