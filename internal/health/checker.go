@@ -13,31 +13,27 @@ import (
 
 // Check suorittaa health checkin serverille configin perusteella.
 // Palauttaa true jos serveri vastaa terveenä.
-func Check(url string, hc config.HealthCheck, he config.HealthSettings) bool {
+func Check(addr string, hc config.CheckEntry, he config.HealthConfig) bool {
 	timeout := he.Timeout
 	if hc.Timeout > 0 {
 		timeout = hc.Timeout
 	}
 
 	retries := he.Retries
-	if hc.Retries > 0 {
-		retries = hc.Retries
-	}
-
 	retryWait := he.RetryWait
-	if hc.RetryWait > 0 {
-		retryWait = hc.RetryWait
+	if retries <= 0 {
+		retries = 1
 	}
 
 	for i := 0; i < retries; i++ {
-		ok := false
+		var ok bool
 		var err error
 
 		switch hc.Type {
 		case "http":
-			ok, err = httpCheck(hc, timeout)
+			ok, err = httpCheck(addr, hc, timeout)
 		case "tcp":
-			ok, err = tcpCheck(hc, timeout)
+			ok, err = tcpCheck(addr, hc, timeout)
 		default:
 			log.Printf("Unknown health check type: %s", hc.Type)
 			return false
@@ -54,17 +50,18 @@ func Check(url string, hc config.HealthCheck, he config.HealthSettings) bool {
 	return false
 }
 
-func httpCheck(hc config.HealthCheck, timeout time.Duration) (bool, error) {
+func httpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, error) {
 	client := &http.Client{
 		Timeout: timeout,
 	}
 
-	// Build full URL
+	// Käytetään osoitetta, johon lisätään portti ja path
 	protocol := hc.Protocol
 	if protocol == "" {
 		protocol = "http"
 	}
-	url := fmt.Sprintf("%s://%s:%d%s", protocol, hc.Host, hc.Port, hc.Path)
+
+	url := fmt.Sprintf("%s://%s:%d%s", protocol, addr, hc.Port, hc.Path)
 	if hc.Method == "" {
 		hc.Method = "GET"
 	}
@@ -98,9 +95,9 @@ func httpCheck(hc config.HealthCheck, timeout time.Duration) (bool, error) {
 	return false, fmt.Errorf("bad status %d", resp.StatusCode)
 }
 
-func tcpCheck(hc config.HealthCheck, timeout time.Duration) (bool, error) {
-	addr := fmt.Sprintf("%s:%d", hc.Host, hc.Port)
-	conn, err := net.DialTimeout("tcp", addr, timeout)
+func tcpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, error) {
+	target := fmt.Sprintf("%s:%d", addr, hc.Port)
+	conn, err := net.DialTimeout("tcp", target, timeout)
 	if err != nil {
 		return false, err
 	}

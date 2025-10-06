@@ -20,7 +20,7 @@ func Run(cfg *config.Config, stop <-chan struct{}) {
 			return
 		default:
 			checkAll(cfg)
-			time.Sleep(cfg.Interval)
+			time.Sleep(cfg.Global.Health.CheckInterval)
 		}
 	}
 }
@@ -39,9 +39,9 @@ func checkAll(cfg *config.Config) {
 			alive := health.Check(addr, server.Check, e.Health)
 
 			if alive {
-				log.Printf("[OK]   %s (%s)", addr, server.Name)
+				log.Printf("[OK]   %s (%s)", addr, server.ID)
 			} else {
-				log.Printf("[FAIL] %s (%s)", addr, server.Name)
+				log.Printf("[FAIL] %s (%s)", addr, server.ID)
 			}
 		}
 	}

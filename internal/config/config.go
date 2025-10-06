@@ -118,7 +118,9 @@ type DNSConfig struct {
 }
 
 type HealthConfig struct {
-	Timeout time.Duration `yaml:"timeout"`
+	Timeout   time.Duration `yaml:"timeout"`
+	Retries   int           `yaml:"retries"`
+	RetryWait time.Duration `yaml:"retry_wait"`
 }
 
 type ConsensusConfig struct {
