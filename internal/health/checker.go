@@ -96,8 +96,14 @@ func httpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, 
 }
 
 func tcpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, error) {
-	target := fmt.Sprintf("%s:%d", addr, hc.Port)
-	conn, err := net.DialTimeout("tcp", target, timeout)
+	var host string
+	if net.ParseIP(addr) != nil && net.ParseIP(addr).To4() == nil {
+		// IPv6 address, wrap in brackets
+		host = fmt.Sprintf("[%s]:%d", addr, hc.Port)
+	} else {
+		host = fmt.Sprintf("%s:%d", addr, hc.Port)
+	}
+	conn, err := net.DialTimeout("tcp", host, timeout)
 	if err != nil {
 		return false, err
 	}

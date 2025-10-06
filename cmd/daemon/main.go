@@ -16,6 +16,7 @@ func main() {
 	}
 
 	// Käynnistetään koordinointi
-	var secondArg /* TODO: replace with the correct type and value */
-	coordinator.Run(cfg, secondArg)
+	// Luo suljettava kanava, jota voidaan käyttää pysäytyssignaalina
+	stopChan := make(chan struct{})
+	coordinator.Run(cfg, stopChan)
 }
