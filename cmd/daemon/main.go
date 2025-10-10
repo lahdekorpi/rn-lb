@@ -2,21 +2,38 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"rn-lb/internal/config"
 	"rn-lb/internal/coordinator"
-	//	"rn-lb/internal/provider/cloudflare"
+	"rn-lb/internal/provider"
 )
 
 func main() {
-	// Ladataan config.yaml
+	// --- 1. Ladataan konfiguraatio ---
 	cfg, err := config.LoadConfig("config.yaml")
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// Käynnistetään koordinointi
-	// Luo suljettava kanava, jota voidaan käyttää pysäytyssignaalina
-	stopChan := make(chan struct{})
-	coordinator.Run(cfg, stopChan)
+	// --- 2. Luodaan provider ---
+	p, err := provider.NewProvider(cfg.Global.Provider)
+	if err != nil {
+		log.Fatalf("failed to init provider: %v", err)
+	}
+	log.Printf("Provider initialized: %T", p)
+
+	// --- 3. Käynnistetään coordinator ---
+	stop := make(chan struct{})
+	go coordinator.Run(cfg, stop)
+
+	// --- 4. Signal handling ---
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	<-sigs
+	log.Println("Shutting down daemon...")
+	close(stop)
 }
