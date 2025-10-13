@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"os"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -118,9 +120,7 @@ type DNSConfig struct {
 }
 
 type HealthConfig struct {
-	Timeout   time.Duration `yaml:"timeout"`
-	Retries   int           `yaml:"retries"`
-	RetryWait time.Duration `yaml:"retry_wait"`
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 type ConsensusConfig struct {
@@ -129,14 +129,42 @@ type ConsensusConfig struct {
 
 // ---------- Loader ----------
 
+// LoadConfig lataa YAML-konfiguraation ja laajentaa environment-muuttujat (${VAR}).
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+
+	expanded := expandEnvVars(string(data))
+
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, err
 	}
+
 	return &cfg, nil
+}
+
+// ---------- Helpers ----------
+
+// expandEnvVars korvaa ${VAR}-muuttujat ympäristömuuttujien arvoilla.
+func expandEnvVars(s string) string {
+	re := regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
+	return re.ReplaceAllStringFunc(s, func(match string) string {
+		key := re.FindStringSubmatch(match)[1]
+		if val, ok := os.LookupEnv(key); ok {
+			return val
+		}
+		return match // jätetään ennalleen jos ei löydy
+	})
+}
+
+// StringifyConfig tulostaa konfiguraation YAMLina (debuggausta varten)
+func (c *Config) StringifyConfig() string {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	_ = enc.Encode(c)
+	return buf.String()
 }

@@ -11,62 +11,57 @@ import (
 	"rn-lb/internal/config"
 )
 
-// Check suorittaa health checkin serverille configin perusteella.
-// Palauttaa true jos serveri vastaa terveenä.
-func Check(addr string, hc config.CheckEntry, he config.HealthConfig) bool {
-	timeout := he.Timeout
-	if hc.Timeout > 0 {
-		timeout = hc.Timeout
+// Check suorittaa health checkin annetulle palvelimelle.
+// Palauttaa true jos palvelin vastaa terveenä.
+func Check(serverAddr string, check config.CheckEntry, healthCfg config.HealthConfig) bool {
+	timeout := healthCfg.Timeout
+	if check.Timeout > 0 {
+		timeout = check.Timeout
+	}
+	if timeout == 0 {
+		timeout = 5 * time.Second
 	}
 
-	retries := he.Retries
-	retryWait := he.RetryWait
-	if retries <= 0 {
-		retries = 1
-	}
-
-	for i := 0; i < retries; i++ {
-		var ok bool
-		var err error
-
-		switch hc.Type {
-		case "http":
-			ok, err = httpCheck(addr, hc, timeout)
-		case "tcp":
-			ok, err = tcpCheck(addr, hc, timeout)
-		default:
-			log.Printf("Unknown health check type: %s", hc.Type)
-			return false
-		}
-
+	for i := 0; i < 3; i++ { // oletuksena 3 yritystä
+		ok, err := performCheck(serverAddr, check, timeout)
 		if ok {
 			return true
 		}
-
-		log.Printf("Health check failed (%s) attempt %d/%d: %v",
-			hc.Type, i+1, retries, err)
-		time.Sleep(retryWait)
+		log.Printf("Health check failed for %s (attempt %d/3): %v", serverAddr, i+1, err)
+		time.Sleep(1 * time.Second)
 	}
 	return false
 }
 
-func httpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, error) {
-	client := &http.Client{
-		Timeout: timeout,
+// performCheck valitsee oikean check-tyypin (http tai tcp)
+func performCheck(serverAddr string, check config.CheckEntry, timeout time.Duration) (bool, error) {
+	switch check.Type {
+	case "http":
+		return httpCheck(serverAddr, check, timeout)
+	case "tcp":
+		return tcpCheck(serverAddr, check, timeout)
+	default:
+		return false, fmt.Errorf("unknown health check type: %s", check.Type)
 	}
+}
 
-	// Käytetään osoitetta, johon lisätään portti ja path
-	protocol := hc.Protocol
+// HTTP health check
+func httpCheck(serverAddr string, check config.CheckEntry, timeout time.Duration) (bool, error) {
+	client := &http.Client{Timeout: timeout}
+
+	protocol := check.Protocol
 	if protocol == "" {
 		protocol = "http"
 	}
 
-	url := fmt.Sprintf("%s://%s:%d%s", protocol, addr, hc.Port, hc.Path)
-	if hc.Method == "" {
-		hc.Method = "GET"
+	fullURL := fmt.Sprintf("%s://%s:%d%s", protocol, serverAddr, check.Port, check.Path)
+
+	method := check.Method
+	if method == "" {
+		method = "GET"
 	}
 
-	req, err := http.NewRequest(hc.Method, url, nil)
+	req, err := http.NewRequest(method, fullURL, nil)
 	if err != nil {
 		return false, err
 	}
@@ -78,9 +73,9 @@ func httpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, 
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 
-	// Jos valid_status lista määritelty, käytetään sitä
-	if len(hc.ValidStatus) > 0 {
-		for _, code := range hc.ValidStatus {
+	// hyväksy 200–399, ellei muuta määritelty
+	if len(check.ValidStatus) > 0 {
+		for _, code := range check.ValidStatus {
 			if resp.StatusCode == code {
 				return true, nil
 			}
@@ -88,22 +83,16 @@ func httpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, 
 		return false, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	// muuten hyväksytään 200–399
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		return true, nil
 	}
 	return false, fmt.Errorf("bad status %d", resp.StatusCode)
 }
 
-func tcpCheck(addr string, hc config.CheckEntry, timeout time.Duration) (bool, error) {
-	var host string
-	if net.ParseIP(addr) != nil && net.ParseIP(addr).To4() == nil {
-		// IPv6 address, wrap in brackets
-		host = fmt.Sprintf("[%s]:%d", addr, hc.Port)
-	} else {
-		host = fmt.Sprintf("%s:%d", addr, hc.Port)
-	}
-	conn, err := net.DialTimeout("tcp", host, timeout)
+// TCP health check (IPv4 + IPv6 compatible)
+func tcpCheck(serverAddr string, check config.CheckEntry, timeout time.Duration) (bool, error) {
+	addr := net.JoinHostPort(serverAddr, fmt.Sprintf("%d", check.Port))
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return false, err
 	}
