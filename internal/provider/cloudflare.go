@@ -1,42 +1,74 @@
-// internal/provider/cloudflare.go
 package provider
 
 import (
+	"context"
 	"fmt"
-	"log"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	cloudflare "github.com/cloudflare/cloudflare-go"
 )
 
-// CloudflareProvider toteuttaa Provider-rajapinnan
+// CloudflareProvider wraps Cloudflare API client.
 type CloudflareProvider struct {
-	client  *cf.API
-	account string
-	zone    string
+	api       *cloudflare.API
+	accountID string
+	zoneID    string
 }
 
-var _ Provider = (*CloudflareProvider)(nil)
-
+// NewCloudflareProvider creates and validates a new Cloudflare provider.
 func NewCloudflareProvider(apiToken, accountID, zoneID string) (*CloudflareProvider, error) {
-	client, err := cf.NewWithAPIToken(apiToken)
+	api, err := cloudflare.NewWithAPIToken(apiToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create cloudflare client: %w", err)
+		return nil, fmt.Errorf("failed to init Cloudflare API: %w", err)
 	}
 	return &CloudflareProvider{
-		client:  client,
-		account: accountID,
-		zone:    zoneID,
+		api:       api,
+		accountID: accountID,
+		zoneID:    zoneID,
 	}, nil
 }
 
-func (p *CloudflareProvider) UpdateARecord(host string, ips []string, proxied bool, ttl int) error {
-	log.Printf("[Cloudflare] Update A record: host=%s ips=%v proxied=%v ttl=%d",
-		host, ips, proxied, ttl)
-	return nil
-}
+// UpdateARecord updates or creates an A record for hostname → ip.
+func (p *CloudflareProvider) UpdateARecord(ctx context.Context, hostname, ip string, proxied bool, ttl int) error {
+	zone := cloudflare.ZoneIdentifier(p.zoneID)
 
-func (p *CloudflareProvider) UpdateTXTRecord(host string, records []string, ttl int) error {
-	log.Printf("[Cloudflare] Update TXT record: host=%s records=%v ttl=%d",
-		host, records, ttl)
+	// List existing A records for hostname
+	records, _, err := p.api.ListDNSRecords(ctx, zone, cloudflare.ListDNSRecordsParams{
+		Type: "A",
+		Name: hostname,
+	})
+	if err != nil {
+		return fmt.Errorf("list DNS records: %w", err)
+	}
+
+	// Define base record data
+	createParams := cloudflare.CreateDNSRecordParams{
+		Type:    "A",
+		Name:    hostname,
+		Content: ip,
+		TTL:     ttl,
+		Proxied: &proxied,
+	}
+
+	// Create or update
+	if len(records) == 0 {
+		_, err = p.api.CreateDNSRecord(ctx, zone, createParams)
+		if err != nil {
+			return fmt.Errorf("create DNS record: %w", err)
+		}
+	} else {
+		updateParams := cloudflare.UpdateDNSRecordParams{
+			ID:      records[0].ID,
+			Type:    "A",
+			Name:    hostname,
+			Content: ip,
+			TTL:     ttl,
+			Proxied: &proxied,
+		}
+		_, err = p.api.UpdateDNSRecord(ctx, zone, updateParams)
+		if err != nil {
+			return fmt.Errorf("update DNS record: %w", err)
+		}
+	}
+
 	return nil
 }

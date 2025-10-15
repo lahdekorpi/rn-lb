@@ -1,16 +1,17 @@
-// internal/provider/factory.go
 package provider
 
 import (
 	"fmt"
-
 	"rn-lb/internal/config"
 )
 
-// NewProvider palauttaa Provider-instanssin konfiguraation perusteella.
-func NewProvider(cfg config.ProviderConfig) (Provider, error) {
+// NewProvider returns a Provider implementation based on configuration.
+func NewProvider(cfg config.ProviderConfig) (interface{}, error) {
 	switch cfg.Type {
 	case "cloudflare":
+		if cfg.Cloudflare.APIToken == "" || cfg.Cloudflare.ZoneID == "" {
+			return nil, fmt.Errorf("invalid cloudflare provider config")
+		}
 		return NewCloudflareProvider(
 			cfg.Cloudflare.APIToken,
 			cfg.Cloudflare.AccountID,
