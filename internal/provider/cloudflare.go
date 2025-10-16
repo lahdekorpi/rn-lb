@@ -4,71 +4,95 @@ import (
 	"context"
 	"fmt"
 
-	cloudflare "github.com/cloudflare/cloudflare-go"
+	cf "github.com/cloudflare/cloudflare-go"
 )
 
-// CloudflareProvider wraps Cloudflare API client.
+// CloudflareProvider hallitsee DNS-tietueita Cloudflare API:n kautta.
 type CloudflareProvider struct {
-	api       *cloudflare.API
-	accountID string
-	zoneID    string
+	api      *cf.API
+	zoneID   string
+	account  string
+	apiToken string
 }
 
-// NewCloudflareProvider creates and validates a new Cloudflare provider.
+// NewCloudflareProvider alustaa uuden Cloudflare-providerin.
 func NewCloudflareProvider(apiToken, accountID, zoneID string) (*CloudflareProvider, error) {
-	api, err := cloudflare.NewWithAPIToken(apiToken)
+	api, err := cf.NewWithAPIToken(apiToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init Cloudflare API: %w", err)
+		return nil, fmt.Errorf("failed to create Cloudflare client: %w", err)
 	}
+
 	return &CloudflareProvider{
-		api:       api,
-		accountID: accountID,
-		zoneID:    zoneID,
+		api:      api,
+		zoneID:   zoneID,
+		account:  accountID,
+		apiToken: apiToken,
 	}, nil
 }
 
-// UpdateARecord updates or creates an A record for hostname → ip.
-func (p *CloudflareProvider) UpdateARecord(ctx context.Context, hostname, ip string, proxied bool, ttl int) error {
-	zone := cloudflare.ZoneIdentifier(p.zoneID)
+// GetRecord hakee tietyn A- tai CNAME-tietueen.
+func (p *CloudflareProvider) GetRecord(hostname string) (string, error) {
+	ctx := context.Background()
+	rc := cf.ZoneIdentifier(p.zoneID)
 
-	// List existing A records for hostname
-	records, _, err := p.api.ListDNSRecords(ctx, zone, cloudflare.ListDNSRecordsParams{
-		Type: "A",
+	records, _, err := p.api.ListDNSRecords(ctx, rc, cf.ListDNSRecordsParams{
 		Name: hostname,
+		Type: "A",
 	})
 	if err != nil {
-		return fmt.Errorf("list DNS records: %w", err)
+		return "", fmt.Errorf("cloudflare: list records failed: %w", err)
 	}
-
-	// Define base record data
-	createParams := cloudflare.CreateDNSRecordParams{
-		Type:    "A",
-		Name:    hostname,
-		Content: ip,
-		TTL:     ttl,
-		Proxied: &proxied,
-	}
-
-	// Create or update
 	if len(records) == 0 {
-		_, err = p.api.CreateDNSRecord(ctx, zone, createParams)
-		if err != nil {
-			return fmt.Errorf("create DNS record: %w", err)
-		}
-	} else {
-		updateParams := cloudflare.UpdateDNSRecordParams{
-			ID:      records[0].ID,
+		return "", fmt.Errorf("cloudflare: record not found for %s", hostname)
+	}
+
+	return records[0].Content, nil
+}
+
+// UpdateRecord päivittää tai luo DNS-tietueen.
+func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied bool, ttl int) error {
+	ctx := context.Background()
+	rc := cf.ZoneIdentifier(p.zoneID)
+
+	// Tarkistetaan, onko tietue olemassa
+	records, _, err := p.api.ListDNSRecords(ctx, rc, cf.ListDNSRecordsParams{
+		Name: hostname,
+		Type: "A",
+	})
+	if err != nil {
+		return fmt.Errorf("cloudflare: list records failed: %w", err)
+	}
+
+	if len(records) == 0 {
+		// Luo uusi tietue
+		_, err := p.api.CreateDNSRecord(ctx, rc, cf.CreateDNSRecordParams{
 			Type:    "A",
 			Name:    hostname,
-			Content: ip,
+			Content: value,
 			TTL:     ttl,
 			Proxied: &proxied,
-		}
-		_, err = p.api.UpdateDNSRecord(ctx, zone, updateParams)
+		})
 		if err != nil {
-			return fmt.Errorf("update DNS record: %w", err)
+			return fmt.Errorf("cloudflare: create record failed: %w", err)
 		}
+		return nil
 	}
 
+	// Päivitä olemassa oleva tietue
+	rec := records[0]
+	_, err = p.api.UpdateDNSRecord(ctx, rc, cf.UpdateDNSRecordParams{
+		ID:      rec.ID,
+		Type:    "A",
+		Name:    hostname,
+		Content: value,
+		TTL:     ttl,
+		Proxied: &proxied,
+	})
+	if err != nil {
+		return fmt.Errorf("cloudflare: update record failed: %w", err)
+	}
 	return nil
 }
+
+// Compile-time check: varmistaa että tämä struct implementoi Provider-rajapinnan.
+var _ Provider = (*CloudflareProvider)(nil)
