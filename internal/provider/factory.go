@@ -6,8 +6,6 @@ import (
 	"rn-lb/internal/config"
 )
 
-// Provider määrittelee yleisen DNS-provider-rajapinnan
-
 // NewProvider palauttaa oikean providerin konfiguraation perusteella.
 func NewProvider(cfg config.ProviderConfig) (Provider, error) {
 	switch cfg.Type {
