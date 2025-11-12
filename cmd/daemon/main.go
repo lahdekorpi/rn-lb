@@ -12,24 +12,26 @@ import (
 )
 
 func main() {
-	// --- 1. Ladataan konfiguraatio ---
+	// 1. Load config
 	cfg, err := config.LoadConfig("config.yaml")
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// --- 2. Luodaan provider ---
+	// 2. Init provider
 	p, err := provider.NewProvider(cfg.Global.Provider)
 	if err != nil {
 		log.Fatalf("failed to init provider: %v", err)
 	}
 	log.Printf("Provider initialized: %T", p)
 
-	// --- 3. Käynnistetään coordinator ---
+	// 3. Start coordinator
 	stop := make(chan struct{})
-	go coordinator.Run(cfg, stop)
+	daemonID := cfg.Daemon.ID // later can load/generate file
 
-	// --- 4. Signal handling ---
+	go coordinator.Run(cfg, p, daemonID, stop)
+
+	// 4. Signals
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 

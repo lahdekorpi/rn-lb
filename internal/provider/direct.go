@@ -3,7 +3,6 @@ package provider
 import "log"
 
 // DirectProvider on yksinkertainen stubi, joka ei tee oikeita DNS-kutsuja.
-// Tätä käytetään testauksessa ja kehityksessä ilman ulkoista API:ta.
 type DirectProvider struct{}
 
 func NewDirectProvider() *DirectProvider {
@@ -11,11 +10,22 @@ func NewDirectProvider() *DirectProvider {
 }
 
 func (p *DirectProvider) UpdateRecord(hostname string, value string, proxied bool, ttl int) error {
-	log.Printf("[direct] would update record %s → %s (ttl=%d, proxied=%v)", hostname, value, ttl, proxied)
+	log.Printf("[direct] A UPDATE %s → %s (TTL=%d, proxied=%v)", hostname, value, ttl, proxied)
 	return nil
 }
 
 func (p *DirectProvider) GetRecord(hostname string) (string, error) {
-	log.Printf("[direct] would get record for %s", hostname)
-	return "127.0.0.1", nil
+	log.Printf("[direct] A GET %s", hostname)
+	return "", nil
+}
+
+// TXT-recordit leader electionia varten
+func (p *DirectProvider) GetTXT(hostname string) (string, error) {
+	log.Printf("[direct] TXT GET %s", hostname)
+	return "", nil
+}
+
+func (p *DirectProvider) UpdateTXT(hostname, value string, ttl int) error {
+	log.Printf("[direct] TXT UPDATE %s → %s (TTL=%d)", hostname, value, ttl)
+	return nil
 }

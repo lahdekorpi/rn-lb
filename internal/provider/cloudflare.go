@@ -26,7 +26,8 @@ func NewCloudflareProvider(apiToken, accountID, zoneID string) (*CloudflareProvi
 	}, nil
 }
 
-// GetRecord fetches current A record value
+// ---- A RECORD ----
+
 func (p *CloudflareProvider) GetRecord(hostname string) (string, error) {
 	ctx := context.Background()
 	zone := cloudflare.ZoneIdentifier(p.zoneID)
@@ -36,28 +37,26 @@ func (p *CloudflareProvider) GetRecord(hostname string) (string, error) {
 		Name: hostname,
 	})
 	if err != nil {
-		return "", fmt.Errorf("list dns failed: %w", err)
+		return "", fmt.Errorf("A lookup failed: %w", err)
 	}
 
 	if len(records) == 0 {
-		return "", fmt.Errorf("A record not found for %s", hostname)
+		return "", fmt.Errorf("A record not found: %s", hostname)
 	}
 
 	return records[0].Content, nil
 }
 
-// UpdateRecord updates or creates DNS A record
 func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied bool, ttl int) error {
 	ctx := context.Background()
 	zone := cloudflare.ZoneIdentifier(p.zoneID)
 
-	// find existing record
 	records, _, err := p.api.ListDNSRecords(ctx, zone, cloudflare.ListDNSRecordsParams{
 		Type: "A",
 		Name: hostname,
 	})
 	if err != nil {
-		return fmt.Errorf("list dns failed: %w", err)
+		return fmt.Errorf("A list failed: %w", err)
 	}
 
 	if len(records) == 0 {
@@ -68,14 +67,10 @@ func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied
 			TTL:     ttl,
 			Proxied: &proxied,
 		})
-		if err != nil {
-			return fmt.Errorf("create record failed: %w", err)
-		}
-		return nil
+		return err
 	}
 
 	rec := records[0]
-
 	_, err = p.api.UpdateDNSRecord(ctx, zone, cloudflare.UpdateDNSRecordParams{
 		ID:      rec.ID,
 		Type:    "A",
@@ -84,8 +79,63 @@ func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied
 		TTL:     ttl,
 		Proxied: &proxied,
 	})
-	if err != nil {
-		return fmt.Errorf("update record failed: %w", err)
-	}
-	return nil
+	return err
 }
+
+// ---- TXT RECORD ----
+
+func (p *CloudflareProvider) GetTXT(hostname string) (string, error) {
+	ctx := context.Background()
+	zone := cloudflare.ZoneIdentifier(p.zoneID)
+
+	records, _, err := p.api.ListDNSRecords(ctx, zone, cloudflare.ListDNSRecordsParams{
+		Type: "TXT",
+		Name: hostname,
+	})
+	if err != nil {
+		return "", fmt.Errorf("TXT lookup failed: %w", err)
+	}
+	if len(records) == 0 {
+		return "", nil // return empty string when missing (easier for election logic)
+	}
+
+	// records[0].Content typically includes the TXT text
+	return records[0].Content, nil
+}
+
+func (p *CloudflareProvider) UpdateTXT(hostname, value string, ttl int) error {
+	ctx := context.Background()
+	zone := cloudflare.ZoneIdentifier(p.zoneID)
+
+	records, _, err := p.api.ListDNSRecords(ctx, zone, cloudflare.ListDNSRecordsParams{
+		Type: "TXT",
+		Name: hostname,
+	})
+	if err != nil {
+		return fmt.Errorf("TXT list failed: %w", err)
+	}
+
+	// create if missing
+	if len(records) == 0 {
+		_, err := p.api.CreateDNSRecord(ctx, zone, cloudflare.CreateDNSRecordParams{
+			Type:    "TXT",
+			Name:    hostname,
+			Content: value,
+			TTL:     ttl,
+		})
+		return err
+	}
+
+	rec := records[0]
+	_, err = p.api.UpdateDNSRecord(ctx, zone, cloudflare.UpdateDNSRecordParams{
+		ID:      rec.ID,
+		Type:    "TXT",
+		Name:    hostname,
+		Content: value,
+		TTL:     ttl,
+	})
+	return err
+}
+
+// compile-time check
+var _ Provider = (*CloudflareProvider)(nil)
