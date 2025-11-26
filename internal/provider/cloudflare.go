@@ -3,34 +3,42 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	cloudflare "github.com/cloudflare/cloudflare-go"
 )
 
-// CloudflareProvider on provider-toteutus, joka käyttää Cloudflaren APIa.
 type CloudflareProvider struct {
 	api       *cloudflare.API
 	accountID string
 	zoneID    string
+
+	mu    sync.Mutex
+	cache map[string]string
 }
 
-// NewCloudflareProvider luo uuden CloudflareProviderin.
+// ---------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------
+
 func NewCloudflareProvider(apiToken, accountID, zoneID string) (*CloudflareProvider, error) {
 	api, err := cloudflare.NewWithAPIToken(apiToken)
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare: init failed: %w", err)
 	}
+
 	return &CloudflareProvider{
 		api:       api,
 		accountID: accountID,
 		zoneID:    zoneID,
+		cache:     make(map[string]string),
 	}, nil
 }
 
-// ---- A-record operations ----
+// ---------------------------------------------------------------------
+// A record operations
+// ---------------------------------------------------------------------
 
-// GetRecord hakee ensimmäisen A-tietueen sisällön annetulle hostname:lle.
-// Jos tietuetta ei löydy, palautetaan tyhjä string ja error nil (käyttäjän logiikka voi tulkita).
 func (p *CloudflareProvider) GetRecord(hostname string) (string, error) {
 	ctx := context.Background()
 	zone := cloudflare.ZoneIdentifier(p.zoneID)
@@ -48,7 +56,6 @@ func (p *CloudflareProvider) GetRecord(hostname string) (string, error) {
 	return records[0].Content, nil
 }
 
-// UpdateRecord päivittää olemassa olevan A-tietueen tai luo uuden, jos ei löydy.
 func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied bool, ttl int) error {
 	ctx := context.Background()
 	zone := cloudflare.ZoneIdentifier(p.zoneID)
@@ -61,7 +68,6 @@ func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied
 		return fmt.Errorf("cloudflare: list A records failed: %w", err)
 	}
 
-	// Luo jos ei ole olemassa
 	if len(records) == 0 {
 		_, err := p.api.CreateDNSRecord(ctx, zone, cloudflare.CreateDNSRecordParams{
 			Type:    "A",
@@ -73,10 +79,10 @@ func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied
 		if err != nil {
 			return fmt.Errorf("cloudflare: create A record failed: %w", err)
 		}
+		p.SetLastIP(hostname, value)
 		return nil
 	}
 
-	// Päivitä ensimmäinen löytyvä
 	rec := records[0]
 	_, err = p.api.UpdateDNSRecord(ctx, zone, cloudflare.UpdateDNSRecordParams{
 		ID:      rec.ID,
@@ -89,13 +95,15 @@ func (p *CloudflareProvider) UpdateRecord(hostname string, value string, proxied
 	if err != nil {
 		return fmt.Errorf("cloudflare: update A record failed: %w", err)
 	}
+
+	p.SetLastIP(hostname, value)
 	return nil
 }
 
-// ---- TXT-record operations (leader election) ----
+// ---------------------------------------------------------------------
+// TXT record operations
+// ---------------------------------------------------------------------
 
-// GetTXT palauttaa TXT-tietueen sisällön (ensimmäinen löytyvä) tai tyhjän stringin, jos ei löydy.
-// Ei palauta erroria, paitsi jos API-kutsu epäonnistuu.
 func (p *CloudflareProvider) GetTXT(hostname string) (string, error) {
 	ctx := context.Background()
 	zone := cloudflare.ZoneIdentifier(p.zoneID)
@@ -110,11 +118,9 @@ func (p *CloudflareProvider) GetTXT(hostname string) (string, error) {
 	if len(records) == 0 {
 		return "", nil
 	}
-	// Cloudflare palauttaa Content kentässä usein lainausmerkeissä — caller voi käsitellä tai ne voi jättää.
 	return records[0].Content, nil
 }
 
-// UpdateTXT luo tai päivittää TXT-tietueen. Käyttötarkoitus: election-lease (esim. "node-id|expiryUnix").
 func (p *CloudflareProvider) UpdateTXT(hostname, value string, ttl int) error {
 	ctx := context.Background()
 	zone := cloudflare.ZoneIdentifier(p.zoneID)
@@ -127,7 +133,6 @@ func (p *CloudflareProvider) UpdateTXT(hostname, value string, ttl int) error {
 		return fmt.Errorf("cloudflare: list TXT records failed: %w", err)
 	}
 
-	// Jos ei löydy, luodaan
 	if len(records) == 0 {
 		_, err := p.api.CreateDNSRecord(ctx, zone, cloudflare.CreateDNSRecordParams{
 			Type:    "TXT",
@@ -141,7 +146,6 @@ func (p *CloudflareProvider) UpdateTXT(hostname, value string, ttl int) error {
 		return nil
 	}
 
-	// Päivitetään ensimmäinen löytyvä
 	rec := records[0]
 	_, err = p.api.UpdateDNSRecord(ctx, zone, cloudflare.UpdateDNSRecordParams{
 		ID:      rec.ID,
@@ -156,5 +160,21 @@ func (p *CloudflareProvider) UpdateTXT(hostname, value string, ttl int) error {
 	return nil
 }
 
-// compile-time check että CloudflareProvider implementoi Provider-rajapinnan
+// ---------------------------------------------------------------------
+// Simple in-process IP cache
+// ---------------------------------------------------------------------
+
+func (p *CloudflareProvider) GetLastIP(host string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cache[host]
+}
+
+func (p *CloudflareProvider) SetLastIP(host, ip string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cache[host] = ip
+}
+
+// ensure Provider interface implemented
 var _ Provider = (*CloudflareProvider)(nil)
